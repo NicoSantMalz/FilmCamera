@@ -10,7 +10,7 @@ object GrainProcessor {
             "KG 200"  -> 0.28f
             "CS 800T" -> 0.62f
             "HP5 400" -> 0.50f
-            "PT 400"  -> 0.18f
+            "PT 400"  -> 0.42f   // ISO 400: grano prominente como scan real
             "VV 50"   -> 0.10f
             else      -> 0.25f
         }
