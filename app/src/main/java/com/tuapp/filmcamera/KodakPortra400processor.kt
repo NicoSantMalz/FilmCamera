@@ -61,7 +61,7 @@ class KodakPortra400Daylight(private val config: DaylightConfig = DaylightConfig
         val bloomRadius: Float          = 45f,
         // Contraste
         val contrastPivot: Float        = 0.10f,   // pivot bajo = medios tonos más brillantes
-        val contrastAmount: Float       = 1.04f    // S-curve muy suave
+        val contrastAmount: Float       = 1.08f    // subido: más punch en medios tonos Portra
     )
 
     fun process(source: Bitmap): Bitmap {
@@ -347,19 +347,22 @@ class KodakPortra400Daylight(private val config: DaylightConfig = DaylightConfig
             val mB = (r*0.008f + g*0.032f + b*0.960f).coerceIn(0f,1f)
             r = mR; g = mG; b = mB
 
-            // Shadow lift C-41 — subido para compensar la neutralización de la cross-channel matrix
+            // Shadow lift C-41 — rango ajustado para no afectar negros puros (bolsa, ropa)
             if (luma < 0.353f) {
-                if (luma > 0.078f) {
-                    val sf = smoothstep(0.353f, 0.078f, luma)
-                    r += (3f/255f)  * sf
-                    g += (18f/255f) * sf
-                    b += (13f/255f) * sf
-                } else {
-                    val sf = smoothstep(0.078f, 0f, luma)
-                    r += (2f/255f) * sf
-                    g += (4f/255f) * sf
-                    b += (3f/255f) * sf
+                if (luma > 0.12f) {
+                    // Sombras medias: lift verde-teal visible
+                    val sf = smoothstep(0.353f, 0.12f, luma)
+                    r += (2f/255f)  * sf
+                    g += (20f/255f) * sf
+                    b += (14f/255f) * sf
+                } else if (luma > 0.04f) {
+                    // Sombras bajas: lift muy sutil
+                    val sf = smoothstep(0.12f, 0.04f, luma)
+                    r += (1f/255f) * sf
+                    g += (3f/255f) * sf
+                    b += (2f/255f) * sf
                 }
+                // Negros puros (luma < 0.04): sin lift
             }
 
             // Desaturación cromática en highlights → pastel
@@ -394,11 +397,19 @@ class KodakPortra400Daylight(private val config: DaylightConfig = DaylightConfig
                     r = rgb2[0]; g = rgb2[1]; b = rgb2[2]
                     directlyModified = true
                 }
-                hh in 195f..248f && luma > 0.28f -> {
+                // Cielo (hue 195-218): desaturar y shift leve — más brumoso
+                hh in 195f..218f && luma > 0.35f -> {
+                    val sw = smoothstep(0.35f, 0.70f, luma)
+                    s = (s * lerp(1.0f, 0.72f, sw)).coerceIn(0f,1f)  // desaturar más el cielo
+                    hh = (hh - 2f * sw).coerceIn(0f,360f)
+                    val rgb2 = hslToRgb(hh, s, l)
+                    r = rgb2[0]; g = rgb2[1]; b = rgb2[2]
+                    directlyModified = true
+                }
+                // Pared/superficies azules (hue 218-248): desaturación suave para que el crema la vire
+                hh in 218f..248f && luma > 0.28f -> {
                     val sw = smoothstep(0.28f, 0.65f, luma)
-                    s = (s * lerp(1.0f, config.skyShift, sw)).coerceIn(0f,1f)
-                    hh = (hh - 4f * sw).coerceIn(0f,360f)
-                    // Reconstruir r/g/b para que el crema posterior opere sobre color ajustado
+                    s = (s * lerp(1.0f, 0.88f, sw)).coerceIn(0f,1f)  // solo -12% sat — preservar base azul
                     val rgb2 = hslToRgb(hh, s, l)
                     r = rgb2[0]; g = rgb2[1]; b = rgb2[2]
                     directlyModified = true
@@ -430,13 +441,16 @@ class KodakPortra400Daylight(private val config: DaylightConfig = DaylightConfig
                 }
             }
 
-            // Highlights crema — umbral bajado a 0.50 e intensidad subida para visibilidad en azules
-            if (luma > 0.50f) {
-                val hf = smoothstep(0.50f, 1.0f, luma)
-                val creamMult = lerp(1.0f, 0.20f, skinWeight)
-                r += (24f/255f) * hf * creamMult
-                g += (13f/255f) * hf * creamMult
-                b += (-18f/255f) * hf * creamMult
+            // Highlights crema — viraje mantequilla diferenciado por zona de color
+            if (luma > 0.46f) {
+                val hf = smoothstep(0.46f, 1.0f, luma)
+                val creamMult = lerp(1.0f, 0.15f, skinWeight)
+                // En zonas azules reducir -B: no queremos neutralizar sino virar a azul-crema
+                val isBlueZone = hh in 195f..270f && s > 0.08f
+                val bMult = if (isBlueZone) 0.35f else 1.0f
+                r += (32f/255f) * hf * creamMult
+                g += (15f/255f) * hf * creamMult
+                b += (-22f/255f) * hf * creamMult * bMult
                 directlyModified = true
             }
 
@@ -673,13 +687,31 @@ class KodakPortra400Tungsten(private val config: TungstenConfig = TungstenConfig
 
 // ── Presets ───────────────────────────────────────────────────────────────────
 object KodakPortra400Presets {
-    val daylightStandard  = KodakPortra400Daylight.DaylightConfig()
+    // Standard: valores base conservadores — funciona bien en cualquier foto
+    val daylightStandard  = KodakPortra400Daylight.DaylightConfig(
+        cmyStrength         = 0.65f,
+        highlightDesatAmount= 0.30f,
+        skinDesaturation    = 0.92f,
+        greenSatBoost       = 0.95f   // ligeramente bajo 1 para no sobreexplotar pasto
+    )
+    // Portrait: los valores que iteramos en sesión para retratos exteriores
     val daylightPortrait  = KodakPortra400Daylight.DaylightConfig(
-        skinDesaturation=0.80f, skinWarmth=0.040f,
-        highlightDesatAmount=0.28f, cmyStrength=0.50f)
+        cmyStrength         = 0.75f,
+        highlightDesatAmount= 0.42f,
+        skinDesaturation    = 0.92f,
+        skinWarmth          = 0.045f,
+        greenSatBoost       = 1.10f,
+        greenHueShift       = 6f,
+        skyShift            = 0.76f
+    )
+    // Landscape: verdes y cielo más vivos, menos énfasis en piel
     val daylightLandscape = KodakPortra400Daylight.DaylightConfig(
-        greenSatBoost=1.28f, greenHueShift=9f,
-        skyShift=0.70f, cmyStrength=0.60f)
+        greenSatBoost       = 1.18f,
+        greenHueShift       = 9f,
+        skyShift            = 0.70f,
+        cmyStrength         = 0.70f,
+        skinDesaturation    = 0.95f
+    )
     val tungstenStandard  = KodakPortra400Tungsten.TungstenConfig()
     val tungstenPortrait  = KodakPortra400Tungsten.TungstenConfig(wbCorrection=0.55f,skinTungstenWarm=0.05f,shadowBlueB=0.07f)
     val tungstenNight     = KodakPortra400Tungsten.TungstenConfig(wbCorrection=0.45f,shadowBlueR=-0.06f,shadowBlueB=0.08f,warmLightBoost=1.25f,bloomOpacity=0.08f,bloomThreshold=0.58f)

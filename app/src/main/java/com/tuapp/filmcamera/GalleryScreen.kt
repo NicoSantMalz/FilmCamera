@@ -43,16 +43,26 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.OutputStream
 
 private const val MAX_PREVIEW_SIZE = 800
+
+private data class PortraPresetOption(
+    val preset: PortraPreset,
+    val label: String,
+    val sublabel: String
+)
+
+private val portraPresetOptions = listOf(
+    PortraPresetOption(PortraPreset.DAYLIGHT, "Daylight", "Exterior"),
+    PortraPresetOption(PortraPreset.OVERCAST, "Overcast", "Nublado"),
+    PortraPresetOption(PortraPreset.TUNGSTEN, "Tungsten", "Interior")
+)
 
 @Composable
 fun GalleryEditorScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // Bitmap base — solo recorte y rotación, sin filtros de color ni grano
     var baseBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
@@ -69,10 +79,9 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
     var viewerW by remember { mutableStateOf(1f) }
     var viewerH by remember { mutableStateOf(1f) }
 
-    // URI guardado para recargar a full res al guardar
-    var currentUri by remember { mutableStateOf<Uri?>(null) }
+    var portraPreset by remember { mutableStateOf(PortraPreset.DAYLIGHT) }
 
-    // Job para recorte — único proceso pesado en preview
+    var currentUri by remember { mutableStateOf<Uri?>(null) }
     var cropJob by remember { mutableStateOf<Job?>(null) }
 
     val launcher = rememberLauncherForActivityResult(
@@ -92,7 +101,6 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
         }
     }
 
-    // Recorte — solo cuando cambia formato/rotación/offset (no filtro ni grano)
     var croppedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isCropping by remember { mutableStateOf(false) }
 
@@ -117,34 +125,17 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
         }
     }
 
-    // ColorMatrix para preview instantáneo — sin procesar píxeles
+    // ColorFilter para preview — GPU, instantáneo
     val previewColorFilter = remember(selectedRoll.name, filterIntensity) {
-        if (selectedRoll.name == "CS 800T") {
-            // Preview aproximado para CS 800T con ColorMatrix
-            val m = android.graphics.ColorMatrix(floatArrayOf(
-                0.92f, 0.00f, 0.02f, 0f, -4f * filterIntensity,
-                0.00f, 0.95f, 0.02f, 0f,  1f * filterIntensity,
-                0.02f, 0.00f, 1.12f, 0f,  6f * filterIntensity,
-                0.00f, 0.00f, 0.00f, 1f,  0f
-            ))
-            val identity = android.graphics.ColorMatrix()
-            val result = FloatArray(20) { i ->
-                identity.array[i] + (m.array[i] - identity.array[i]) * filterIntensity
-            }
-            ColorFilter.colorMatrix(ColorMatrix(result))
-        } else {
-            val androidMatrix = FilmFilters.getMatrix(selectedRoll.name, filterIntensity)
-            ColorFilter.colorMatrix(ColorMatrix(androidMatrix.array))
-        }
+        val androidMatrix = FilmFilters.getMatrix(selectedRoll.name, filterIntensity)
+        ColorFilter.colorMatrix(ColorMatrix(androidMatrix.array))
     }
 
     LaunchedEffect(photoSaved) {
         if (photoSaved) { delay(2000); photoSaved = false }
     }
 
-    Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black)
-    ) {
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         Column(modifier = Modifier.fillMaxSize()) {
 
             // Barra superior
@@ -157,7 +148,7 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                 Text(selectedRoll.iso, color = Color.Gray, fontSize = 14.sp)
             }
 
-            // Visor — ColorFilter aplicado directo en Compose (GPU, instantáneo)
+            // Visor
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -184,7 +175,6 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                         Text("Cargando foto...", color = Color.Gray, fontSize = 14.sp)
                     }
                     croppedBitmap != null -> {
-                        // ColorFilter en GPU — instantáneo
                         Image(
                             bitmap = croppedBitmap!!.asImageBitmap(),
                             contentDescription = null,
@@ -195,7 +185,9 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
 
                         if (isCropping) {
                             Box(
-                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.2f)),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.2f)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text("Recortando...", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
@@ -227,8 +219,26 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
                                     .padding(horizontal = 14.dp, vertical = 6.dp)
                             ) {
-                                Text("↔ Arrastra para encuadrar",
-                                    color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp)
+                                Text(
+                                    "↔ Arrastra para encuadrar",
+                                    color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp
+                                )
+                            }
+                        }
+
+                        if (isSaving) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.5f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "Procesando...",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
 
@@ -255,17 +265,68 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                         ) {
                             Text("🎞", fontSize = 48.sp)
                             Spacer(modifier = Modifier.height(16.dp))
-                            Text("Selecciona una foto", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Selecciona una foto",
+                                color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold
+                            )
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text("Elige un rollo y aplica el filtro analógico", color = Color(0xFF666666), fontSize = 13.sp)
+                            Text(
+                                "Elige un rollo y aplica el filtro analógico",
+                                color = Color(0xFF666666), fontSize = 13.sp
+                            )
                         }
                     }
                 }
             }
 
-            // Formato + colores de borde
+            // ── Chips de preset — solo visibles con PT 400 ─────────────────
+            if (selectedRoll.name == "PT 400") {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(portraPresetOptions) { option ->
+                        val isSelected = portraPreset == option.preset
+                        Box(
+                            modifier = Modifier
+                                .clickable { portraPreset = option.preset }
+                                .background(
+                                    if (isSelected) Color(0xFFC8A882) else Color(0xFF1A1A1A),
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (isSelected) Color(0xFFC8A882) else Color(0xFF333333),
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = option.label,
+                                    color = if (isSelected) Color.White else Color.Gray,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Text(
+                                    text = option.sublabel,
+                                    color = if (isSelected) Color.White.copy(alpha = 0.7f)
+                                    else Color(0xFF555555),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Formato + colores de borde ─────────────────────────────────
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 LazyRow(
@@ -280,14 +341,18 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                                     if (selectedFormat == format) Color(0xFF333333) else Color(0xFF1A1A1A),
                                     RoundedCornerShape(8.dp)
                                 )
-                                .border(1.dp,
+                                .border(
+                                    1.dp,
                                     if (selectedFormat == format) Color.White else Color(0xFF333333),
-                                    RoundedCornerShape(8.dp))
+                                    RoundedCornerShape(8.dp)
+                                )
                                 .padding(horizontal = 10.dp, vertical = 7.dp)
                         ) {
-                            Text(format.label,
+                            Text(
+                                format.label,
                                 color = if (selectedFormat == format) Color.White else Color.Gray,
-                                fontSize = 11.sp)
+                                fontSize = 11.sp
+                            )
                         }
                     }
                 }
@@ -295,20 +360,28 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     borderColors.forEach { bc ->
                         val isSelected = selectedBorderColor == bc
-                        val displayColor = if (bc.name == "Transparente") Color(0xFF2A2A2A) else Color(bc.color)
+                        val displayColor = if (bc.name == "Transparente") Color(0xFF2A2A2A)
+                        else Color(bc.color)
                         Box(
                             modifier = Modifier
                                 .size(22.dp).clip(CircleShape).background(displayColor)
-                                .border(if (isSelected) 2.dp else 0.5.dp,
-                                    if (isSelected) Color.White else Color(0xFF555555), CircleShape)
+                                .border(
+                                    if (isSelected) 2.dp else 0.5.dp,
+                                    if (isSelected) Color.White else Color(0xFF555555),
+                                    CircleShape
+                                )
                                 .clickable { selectedBorderColor = bc }
                         )
                     }
                 }
             }
 
-            // Sliders
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+            // ── Sliders ────────────────────────────────────────────────────
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 4.dp)
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -326,11 +399,12 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                             inactiveTrackColor = Color(0xFF333333)
                         )
                     )
-                    Text("${(filterIntensity * 100).toInt()}%",
-                        color = Color.Gray, fontSize = 12.sp, modifier = Modifier.width(36.dp))
+                    Text(
+                        "${(filterIntensity * 100).toInt()}%",
+                        color = Color.Gray, fontSize = 12.sp, modifier = Modifier.width(36.dp)
+                    )
                 }
 
-                // Slider de grano — funciona para todos los rollos
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -348,29 +422,14 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                             inactiveTrackColor = Color(0xFF333333)
                         )
                     )
-                    Text("${(grainIntensity * 100).toInt()}%",
-                        color = Color.Gray, fontSize = 12.sp, modifier = Modifier.width(36.dp))
-                }
-                // Nota para CineStill: grano propio calibrado
-                if (selectedRoll.name == "CS 800T" && grainIntensity < 0.05f) {
-                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text("Grano desactivado", color = Color(0xFF555555), fontSize = 10.sp)
-                    }
-                }
-                // Para CS 800T mostrar el preset
-                if (selectedRoll.name == "CS 800T") {
-                    val preset = when {
-                        filterIntensity < 0.33f -> "Indoor Tungsten"
-                        filterIntensity < 0.66f -> "Cinematic Standard"
-                        else -> "Neon Night"
-                    }
-                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), contentAlignment = Alignment.Center) {
-                        Text("Preset: $preset", color = Color(0xFF4A7AAC), fontSize = 11.sp)
-                    }
+                    Text(
+                        "${(grainIntensity * 100).toInt()}%",
+                        color = Color.Gray, fontSize = 12.sp, modifier = Modifier.width(36.dp)
+                    )
                 }
             }
 
-            // Selector de rollos
+            // ── Selector de rollos ─────────────────────────────────────────
             LazyRow(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -384,12 +443,13 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                             selectedRoll = roll
                             grainIntensity = GrainProcessor.getBaseGrain(roll.name)
                             filterIntensity = 1f
+                            if (roll.name == "PT 400") portraPreset = PortraPreset.DAYLIGHT
                         }
                     )
                 }
             }
 
-            // Botones
+            // ── Botones ────────────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -407,19 +467,19 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                     Text("GAL", color = Color.Gray, fontSize = 10.sp)
                 }
 
-                // Botón guardar — procesa a alta calidad solo al guardar
                 Box(
                     modifier = Modifier
                         .size(76.dp).clip(CircleShape)
-                        .border(3.dp,
+                        .border(
+                            3.dp,
                             if (croppedBitmap != null && !isSaving) Color.White else Color(0xFF333333),
-                            CircleShape)
+                            CircleShape
+                        )
                         .clickable {
                             if (croppedBitmap != null && !isSaving && currentUri != null) {
                                 scope.launch {
                                     isSaving = true
                                     try {
-                                        // Capturar valores antes de cambiar de hilo
                                         val appContext = context.applicationContext
                                         val roll = selectedRoll
                                         val fIntensity = filterIntensity
@@ -430,31 +490,56 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                                         val borderColor = selectedBorderColor.color
                                         val offX = offsetX
                                         val offY = offsetY
+                                        val preset = portraPreset
 
-                                        // 1. Cargar y procesar en Default
-                                        val filtered = withContext(Dispatchers.Default) {
+                                        val filtered = withContext(Dispatchers.IO) {
+                                            // 1. Cargar imagen full res (IO)
                                             val fullRes = loadBitmapFromUri(appContext, uri, 4000)
-                                                ?: croppedBitmap!!
+                                                ?: return@withContext null
+
+                                            // 2. Rotar y recortar (puede ser IO)
                                             val rotated = if (rotation != 0) {
                                                 val m = android.graphics.Matrix()
                                                 m.postRotate(rotation.toFloat())
                                                 Bitmap.createBitmap(fullRes, 0, 0, fullRes.width, fullRes.height, m, true)
                                             } else fullRes
-                                            val fullCropped = FormatCrop.apply(
-                                                rotated, format, borderColor, offX, offY
-                                            )
-                                            // Aplicar filtro completo con grano y textura
-                                            FilmFilters.applyFilmFilter(
-                                                fullCropped, roll.name, fIntensity, gIntensity, appContext
+                                            val fullCropped = FormatCrop.apply(rotated, format, borderColor, offX, offY)
+
+                                            // 3. Cargar crops de textura en IO (acceso a assets)
+                                            val crops = if (gIntensity > 0.01f) {
+                                                FilmTextureGrain.loadTextureBitmaps(
+                                                    appContext, fullCropped.width, fullCropped.height, roll.name
+                                                )?.toList()
+                                            } else null
+                                            android.util.Log.d("Gallery", "Crops cargados: ${crops != null}, bitmap: ${fullCropped.width}x${fullCropped.height}")
+
+                                            // 4. Procesar píxeles en Default
+                                            withContext(Dispatchers.Default) {
+                                                FilmFilters.applyFilmFilter(
+                                                    bitmap          = fullCropped,
+                                                    rollName        = roll.name,
+                                                    filterIntensity = fIntensity,
+                                                    grainIntensity  = gIntensity,
+                                                    context         = null,
+                                                    portraPreset    = preset,
+                                                    textureCrops    = crops
+                                                )
+                                            }
+                                        }
+
+                                        if (filtered != null) {
+                                            saveProcessedPhoto(
+                                                context = context,
+                                                bitmap  = filtered,
+                                                onSaved = { photoSaved = true },
+                                                onError = {}
                                             )
                                         }
-                                        // 2. Guardar en IO
-                                        saveProcessedPhoto(context, filtered,
-                                            onSaved = { photoSaved = true },
-                                            onError = {}
-                                        )
-                                    } catch (e: Exception) { }
-                                    isSaving = false
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("Gallery", "Error guardando: ${e.message}")
+                                    } finally {
+                                        isSaving = false
+                                    }
                                 }
                             }
                         }
@@ -463,16 +548,13 @@ fun GalleryEditorScreen(onBack: () -> Unit) {
                     Box(
                         modifier = Modifier.fillMaxSize().clip(CircleShape)
                             .background(
-                                if (croppedBitmap != null && !isSaving) Color.White else Color(0xFF1A1A1A)
+                                if (croppedBitmap != null && !isSaving) Color.White
+                                else Color(0xFF1A1A1A)
                             )
                     )
                 }
 
-                if (isSaving) {
-                    Text("Guardando...", color = Color.Gray, fontSize = 10.sp)
-                } else {
-                    Box(modifier = Modifier.size(60.dp))
-                }
+                Box(modifier = Modifier.size(60.dp))
             }
         }
     }
@@ -483,11 +565,15 @@ suspend fun loadBitmapFromUri(context: Context, uri: Uri, maxSize: Int = MAX_PRE
         try {
             val exifStream = context.contentResolver.openInputStream(uri)
             val exif = ExifInterface(exifStream!!)
-            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val orientation = exif.getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+            )
             exifStream.close()
 
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
 
             val sampleSize = calculateSampleSize(opts.outWidth, opts.outHeight, maxSize)
             val decodeOpts = BitmapFactory.Options().apply {
@@ -508,7 +594,9 @@ suspend fun loadBitmapFromUri(context: Context, uri: Uri, maxSize: Int = MAX_PRE
             if (degrees != 0f) {
                 val matrix = android.graphics.Matrix()
                 matrix.postRotate(degrees)
-                bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                bitmap = Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                )
             }
             bitmap
         } catch (e: Exception) { null }
@@ -521,7 +609,12 @@ private fun calculateSampleSize(width: Int, height: Int, maxSize: Int): Int {
     return sampleSize
 }
 
-suspend fun saveProcessedPhoto(context: Context, bitmap: Bitmap, onSaved: () -> Unit, onError: (String) -> Unit) {
+suspend fun saveProcessedPhoto(
+    context: Context,
+    bitmap: Bitmap,
+    onSaved: () -> Unit,
+    onError: (String) -> Unit
+) {
     withContext(Dispatchers.IO) {
         try {
             val cv = ContentValues().apply {
@@ -531,7 +624,9 @@ suspend fun saveProcessedPhoto(context: Context, bitmap: Bitmap, onSaved: () -> 
                     put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/FilmCamera")
                 }
             }
-            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+            val uri = context.contentResolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv
+            )
             uri?.let {
                 context.contentResolver.openOutputStream(it)?.use { out ->
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)

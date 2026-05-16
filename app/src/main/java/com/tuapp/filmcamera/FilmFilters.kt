@@ -51,14 +51,13 @@ object FilmFilters {
         return ColorMatrix(FloatArray(20) { i -> f[i] + (toA[i] - f[i]) * t })
     }
 
-    // Preview en cámara — ColorMatrix instantánea (GPU, sin procesar píxeles)
     fun getMatrix(rollName: String, intensity: Float = 1f): ColorMatrix {
         return when (rollName) {
             "KG 200"  -> getKodakGold200(intensity)
             "HP5 400" -> getIlfordHP5(intensity)
             "PT 400"  -> getKodakPortra400(intensity)
             "VV 50"   -> getFujiVelvia50(intensity)
-            "CS 800T" -> ColorMatrix() // CS 800T usa processor propio al guardar
+            "CS 800T" -> ColorMatrix()
             else      -> ColorMatrix()
         }
     }
@@ -69,57 +68,47 @@ object FilmFilters {
             filterIntensity < 0.66f -> CineStill800TPresets.cinematicStandard
             else                    -> CineStill800TPresets.neonNight
         }
-        return base.copy(grainEnabled = false) // grano siempre via FilmTextureGrain
+        return base.copy(grainEnabled = false)
     }
 
-    /**
-     * Aplica el filtro completo al bitmap para guardado.
-     * Pipeline:
-     *   1. Color science (ColorMatrix o CineStill800TProcessor)
-     *   2. GrainProcessor Silver Halide (todos excepto CS 800T)
-     *   3. FilmTextureGrain textura real (todos los rollos si hay contexto)
-     */
     @Suppress("UNUSED_PARAMETER")
     fun applyFilmFilter(
         bitmap: Bitmap,
         rollName: String,
         filterIntensity: Float,
         grainIntensity: Float = 1f,
-        context: Context? = null
+        context: Context? = null,
+        portraPreset: PortraPreset = PortraPreset.DAYLIGHT,
+        textureCrops: List<Bitmap?>? = null
     ): Bitmap {
 
-        android.util.Log.d("FilmFilters", "applyFilmFilter: roll=$rollName filter=$filterIntensity grain=$grainIntensity context=${context != null}")
+        android.util.Log.d("FilmFilters", "applyFilmFilter: roll=$rollName filter=$filterIntensity grain=$grainIntensity preset=$portraPreset")
+
         // ── Paso 1: Filtro de color ────────────────────────────────────────
         val colorFiltered: Bitmap = when (rollName) {
             "CS 800T" -> {
-                // CineStill: pipeline completo con halación real
                 val config = getCineStillConfig(filterIntensity, grainIntensity)
                 CineStill800TProcessor(config).process(bitmap)
             }
             "PT 400" -> {
-                // Detectar automáticamente si es escena de día o noche/interior
-                // basándonos en la luma promedio y distribución de la imagen
-                val avgLuma = computeAverageLuma(bitmap)
-                val isDaylight = avgLuma > 0.28f
-
-                if (isDaylight) {
-                    // Motor Daylight: luz natural, exteriores
-                    val preset = when {
-                        filterIntensity < 0.40f -> KodakPortra400Presets.daylightPortrait
-                        filterIntensity < 0.75f -> KodakPortra400Presets.daylightStandard
-                        else -> KodakPortra400Presets.daylightLandscape
+                // Usar preset seleccionado explícitamente por el usuario
+                when (portraPreset) {
+                    PortraPreset.TUNGSTEN -> {
+                        val preset = KodakPortra400Presets.tungstenStandard
+                        val config = scalePortraTungstenConfig(preset, filterIntensity)
+                        KodakPortra400Tungsten(config).process(bitmap)
                     }
-                    val config = scalePortraDaylightConfig(preset, filterIntensity)
-                    KodakPortra400Daylight(config).process(bitmap)
-                } else {
-                    // Motor Tungsten: interior, luz artificial, noche
-                    val preset = when {
-                        filterIntensity < 0.40f -> KodakPortra400Presets.tungstenPortrait
-                        filterIntensity < 0.75f -> KodakPortra400Presets.tungstenStandard
-                        else -> KodakPortra400Presets.tungstenNight
+                    PortraPreset.OVERCAST -> {
+                        // Overcast: Daylight con config conservadora (sin crema agresivo)
+                        val preset = KodakPortra400Presets.daylightStandard
+                        val config = scalePortraDaylightConfig(preset, filterIntensity)
+                        KodakPortra400Daylight(config).process(bitmap)
                     }
-                    val config = scalePortraTungstenConfig(preset, filterIntensity)
-                    KodakPortra400Tungsten(config).process(bitmap)
+                    PortraPreset.DAYLIGHT -> {
+                        val preset = KodakPortra400Presets.daylightPortrait
+                        val config = scalePortraDaylightConfig(preset, filterIntensity)
+                        KodakPortra400Daylight(config).process(bitmap)
+                    }
                 }
             }
             else -> {
@@ -137,48 +126,52 @@ object FilmFilters {
             colorFiltered
         }
 
-        // ── Paso 3: Textura física 8K ─────────────────────────────────────
-        // Solo textura real — el grano sintético CPU generaba artefactos
-        // ── Grano C-41 físico para Portra 400 ────────────────────────────
-        // Capa de grano orgánico con estructura real de revelado C-41
-        // (3 capas independientes, clusters ovales, acopladores de color)
+        // ── Paso 3: Grano C-41 físico para Portra 400 ─────────────────────
         val withC41Grain: Bitmap = if (rollName == "PT 400" && grainIntensity > 0.01f) {
             PortraGrainProcessor.apply(withGrain, grainIntensity)
         } else withGrain
 
-        val withTexture: Bitmap = if (context != null && grainIntensity > 0.01f) {
-            val textureIntensity = when (rollName) {
-                "CS 800T" -> (grainIntensity * 1.40f).coerceIn(0f, 1f)
-                "HP5 400" -> (grainIntensity * 1.55f).coerceIn(0f, 1f)
-                "VV 50"   -> (grainIntensity * 0.75f).coerceIn(0f, 1f)
-                "PT 400"  -> (grainIntensity * 1.20f).coerceIn(0f, 1f)  // reducido: C-41 ya aportó base
-                else       -> (grainIntensity * 1.25f).coerceIn(0f, 1f)
+        // ── Paso 4: Textura física 8K ──────────────────────────────────────
+        // Usar textureCrops pre-cargados si están disponibles (evita re-leer assets)
+        val withTexture: Bitmap = when {
+            textureCrops != null && grainIntensity > 0.01f -> {
+                val textureIntensity = when (rollName) {
+                    "CS 800T" -> (grainIntensity * 1.40f).coerceIn(0f, 1f)
+                    "HP5 400" -> (grainIntensity * 1.55f).coerceIn(0f, 1f)
+                    "VV 50"   -> (grainIntensity * 0.75f).coerceIn(0f, 1f)
+                    "PT 400"  -> (grainIntensity * 1.20f).coerceIn(0f, 1f)
+                    else      -> (grainIntensity * 1.25f).coerceIn(0f, 1f)
+                }
+                val cleanliness = when (rollName) {
+                    "CS 800T" -> 0.35f
+                    "HP5 400" -> 0.25f
+                    "VV 50"   -> 0.60f
+                    "PT 400"  -> 0.35f
+                    else      -> 0.40f
+                }
+                FilmTextureGrain.applyWithCrops(withC41Grain, textureCrops, textureIntensity, cleanliness)
             }
-            val cleanliness = when (rollName) {
-                "CS 800T" -> 0.35f
-                "HP5 400" -> 0.25f
-                "VV 50"   -> 0.60f
-                "PT 400"  -> 0.35f   // Portra: grano orgánico visible
-                else       -> 0.40f
+            context != null && grainIntensity > 0.01f -> {
+                val textureIntensity = when (rollName) {
+                    "CS 800T" -> (grainIntensity * 1.40f).coerceIn(0f, 1f)
+                    "HP5 400" -> (grainIntensity * 1.55f).coerceIn(0f, 1f)
+                    "VV 50"   -> (grainIntensity * 0.75f).coerceIn(0f, 1f)
+                    "PT 400"  -> (grainIntensity * 1.20f).coerceIn(0f, 1f)
+                    else      -> (grainIntensity * 1.25f).coerceIn(0f, 1f)
+                }
+                val cleanliness = when (rollName) {
+                    "CS 800T" -> 0.35f
+                    "HP5 400" -> 0.25f
+                    "VV 50"   -> 0.60f
+                    "PT 400"  -> 0.35f
+                    else      -> 0.40f
+                }
+                FilmTextureGrain.apply(context, withC41Grain, textureIntensity, cleanliness, rollName)
             }
-            FilmTextureGrain.apply(context, withC41Grain, textureIntensity, cleanliness, rollName)
-        } else withGrain
+            else -> withC41Grain
+        }
 
         return withTexture
-    }
-
-    private fun computeAverageLuma(bitmap: Bitmap): Float {
-        val w = bitmap.width; val h = bitmap.height
-        // Muestrear cada 8px para velocidad
-        var sum = 0f; var count = 0
-        val px = IntArray(w * h); bitmap.getPixels(px, 0, w, 0, 0, w, h)
-        var i = 0
-        while (i < px.size) {
-            val p = px[i]
-            sum += Color.red(p)*0.2126f/255f + Color.green(p)*0.7152f/255f + Color.blue(p)*0.0722f/255f
-            count++; i += 8
-        }
-        return if (count > 0) sum/count else 0.5f
     }
 
     private fun scalePortraDaylightConfig(
